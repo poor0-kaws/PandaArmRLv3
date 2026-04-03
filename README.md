@@ -59,10 +59,10 @@ the observation is the robot's "state of the world" in number form.
 
 ## Setup
 
-This project was trained on this machine with the Conda environment:
+This project was trained with a Conda environment named `bullet_env`.
 
 ```bash
-/Users/swaroophebbar/anaconda/anaconda3/envs/bullet_env
+conda activate bullet_env
 ```
 
 That environment matters because `pybullet` is easier to run there than on newer Python versions.
@@ -72,13 +72,13 @@ That environment matters because `pybullet` is easier to run there than on newer
 If you already have the Conda environment, the main packages are:
 
 ```bash
-/Users/swaroophebbar/anaconda/anaconda3/envs/bullet_env/bin/python -m pip install torch stable-baselines3 shimmy pytest
+python -m pip install torch stable-baselines3 shimmy pytest
 ```
 
 If you want to install the packages listed in `requirements.txt`, run:
 
 ```bash
-/Users/swaroophebbar/anaconda/anaconda3/envs/bullet_env/bin/python -m pip install -r requirements.txt
+python -m pip install -r requirements.txt
 ```
 
 ## Train The Agent
@@ -86,7 +86,7 @@ If you want to install the packages listed in `requirements.txt`, run:
 Basic training command:
 
 ```bash
-MPLCONFIGDIR=/tmp/matplotlib /Users/swaroophebbar/anaconda/anaconda3/envs/bullet_env/bin/python train.py --timesteps 200000 --save-path panda_ppo_gripper_v2
+MPLCONFIGDIR=/tmp/matplotlib python train.py --timesteps 200000 --save-path panda_ppo_gripper_v2
 ```
 
 What this means:
@@ -104,7 +104,7 @@ The right way to know is to train different checkpoints and compare them with ev
 To evaluate the improved model:
 
 ```bash
-MPLCONFIGDIR=/tmp/matplotlib /Users/swaroophebbar/anaconda/anaconda3/envs/bullet_env/bin/python eval.py --model-path panda_ppo_gripper_v2 --episodes 20
+MPLCONFIGDIR=/tmp/matplotlib python eval.py --model-path panda_ppo_gripper_v2 --episodes 20
 ```
 
 What `eval.py` does:
@@ -127,7 +127,7 @@ This means the new setup is not solved yet, but it is clearly better than before
 ## Run Tests
 
 ```bash
-MPLCONFIGDIR=/tmp/matplotlib /Users/swaroophebbar/anaconda/anaconda3/envs/bullet_env/bin/python -m pytest -q test_panda_env.py
+MPLCONFIGDIR=/tmp/matplotlib python -m pytest -q test_panda_env.py
 ```
 
 At the time of writing, the environment tests passed with:
