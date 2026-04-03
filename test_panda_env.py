@@ -13,7 +13,7 @@ pytest.importorskip("pybullet")
 
 import pybullet as p
 
-from main import ACTION_DIM, OBS_DIM, PandaEnv
+from main import ACTION_DIM, OBS_DIM, SUCCESS_DISTANCE, PandaEnv
 
 
 def test_step_returns_tuple_with_expected_types_and_obs_shape():
@@ -59,13 +59,47 @@ def test_action_wrong_shape_raises():
         env.step(np.zeros(ACTION_DIM - 1, dtype=np.float32))
 
 
-def test_reward_matches_negative_cube_to_target_distance():
+def test_step_info_contains_distances_and_success_flag():
     env = PandaEnv()
     env.reset(seed=2)
-    obs, r, _, _, _ = env.step(np.zeros(ACTION_DIM, dtype=np.float32))
+    obs, reward, terminated, _, info = env.step(np.zeros(ACTION_DIM, dtype=np.float32))
     cube = obs[7:10]
-    expected = float(-np.linalg.norm(cube - env.target_pos))
-    assert abs(r - expected) < 1e-4
+    ee = obs[13:16]
+
+    assert isinstance(reward, float)
+    assert isinstance(info["cube_to_target_distance"], float)
+    assert isinstance(info["ee_to_cube_distance"], float)
+    assert isinstance(info["is_success"], bool)
+
+    expected_cube_distance = float(np.linalg.norm(cube - env.target_pos))
+    expected_ee_distance = float(np.linalg.norm(ee - cube))
+
+    assert abs(info["cube_to_target_distance"] - expected_cube_distance) < 1e-4
+    assert abs(info["ee_to_cube_distance"] - expected_ee_distance) < 1e-4
+    assert info["is_success"] == terminated
+
+
+def test_reward_includes_large_success_bonus():
+    env = PandaEnv()
+    env.reset(seed=0)
+
+    goal_pos = np.array([0.5, 0.0, env.z_table], dtype=np.float32)
+    env.target_pos = goal_pos.copy()
+    p.resetBasePositionAndOrientation(
+        env.cube_id,
+        goal_pos.tolist(),
+        [0.0, 0.0, 0.0, 1.0],
+        physicsClientId=env.client,
+    )
+    env._prev_cube_to_target = 0.0
+    env._prev_ee_to_cube = float(np.linalg.norm(env._ee_position() - goal_pos))
+
+    _, reward, terminated, _, info = env.step(np.zeros(ACTION_DIM, dtype=np.float32))
+
+    assert terminated
+    assert info["is_success"]
+    assert info["cube_to_target_distance"] < SUCCESS_DISTANCE
+    assert reward > 20.0
 
 
 def test_gripper_fingers_reset_open():

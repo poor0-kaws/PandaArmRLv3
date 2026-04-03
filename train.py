@@ -13,15 +13,13 @@ def main():
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
 
-    # stable-baselines3 expects Gym-like envs; we use a compatibility wrapper.
-    from shimmy import GymnasiumV26CompatibilityV0
     from stable_baselines3 import PPO
     from stable_baselines3.common.vec_env import DummyVecEnv
 
     def make_env():
         env = PandaEnv(max_episode_steps=args.max_episode_steps)
         env.reset(seed=args.seed)
-        return GymnasiumV26CompatibilityV0(env)
+        return env
 
     vec_env = DummyVecEnv([make_env])
 
@@ -44,4 +42,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

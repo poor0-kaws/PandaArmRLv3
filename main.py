@@ -6,6 +6,7 @@ from gymnasium import spaces
 
 ACTION_DIM = 8
 OBS_DIM = 16
+SUCCESS_DISTANCE = 0.05
 
 
 class PandaEnv(gym.Env):
@@ -50,8 +51,19 @@ class PandaEnv(gym.Env):
         self._arm_joints = self._discover_arm_joints()
         self._finger_joints = self._discover_finger_joints()
         self._home_q = np.array([0.0, -0.5, 0.5, -2.4, 0.0, 1.6, 0.0], dtype=np.float64)
+        self._ee_orientation = p.getQuaternionFromEuler(
+            [np.pi, 0.0, 0.0], physicsClientId=self.client
+        )
+        self._ee_low = np.array([0.30, -0.30, 0.03], dtype=np.float32)
+        self._ee_high = np.array([0.72, 0.30, 0.30], dtype=np.float32)
+        self._ee_target_pos = np.array([0.5, 0.0, 0.18], dtype=np.float32)
+        self._prev_cube_to_target = 0.0
+        self._prev_ee_to_cube = 0.0
 
-        # 8-D action: 7 arm deltas + 1 gripper open/close command.
+        # 8-D action:
+        # - first 3 numbers move the hand in x/y/z
+        # - next 4 are reserved for future use
+        # - last number opens/closes the gripper
         self.action_space = spaces.Box(
             low=-1.0, high=1.0, shape=(ACTION_DIM,), dtype=np.float32
         )
@@ -97,22 +109,91 @@ class PandaEnv(gym.Env):
                 out.append(i)
         return sorted(out)
 
+    def _set_gripper(self, gripper_cmd):
+        finger_target = float(0.02 * (1.0 - gripper_cmd))  # -1=open, +1=closed
+
+        for fi in self._finger_joints:
+            p.setJointMotorControl2(
+                self.robot_id,
+                fi,
+                p.POSITION_CONTROL,
+                targetPosition=finger_target,
+                positionGain=0.2,
+                velocityGain=0.95,
+                force=60.0,
+                physicsClientId=self.client,
+            )
+
+    def _move_ee_to(self, target_pos):
+        target_pos = np.clip(target_pos, self._ee_low, self._ee_high).astype(np.float32)
+        self._ee_target_pos = target_pos
+
+        joint_targets = p.calculateInverseKinematics(
+            self.robot_id,
+            self._ee_link,
+            targetPosition=target_pos.tolist(),
+            targetOrientation=self._ee_orientation,
+            physicsClientId=self.client,
+        )
+
+        for k, ji in enumerate(self._arm_joints):
+            tgt_q = float(np.clip(joint_targets[k], self.joint_low[k], self.joint_high[k]))
+            p.setJointMotorControl2(
+                self.robot_id,
+                ji,
+                p.POSITION_CONTROL,
+                targetPosition=tgt_q,
+                positionGain=0.2,
+                velocityGain=1.0,
+                force=120.0,
+                physicsClientId=self.client,
+            )
+
+    def _sample_cube_and_target_xy(self):
+        for _ in range(256):
+            cube_xy = self.np_random.uniform(self.xy_low, self.xy_high)
+            angle = float(self.np_random.uniform(-np.pi, np.pi))
+            distance = float(self.np_random.uniform(0.08, 0.18))
+            direction = np.array([np.cos(angle), np.sin(angle)], dtype=np.float32)
+            target_xy = cube_xy + distance * direction
+
+            if np.any(target_xy < self.xy_low) or np.any(target_xy > self.xy_high):
+                continue
+
+            if np.linalg.norm(cube_xy) < 0.20:
+                continue
+
+            return cube_xy.astype(np.float32), target_xy.astype(np.float32)
+
+        return (
+            np.array([0.50, 0.00], dtype=np.float32),
+            np.array([0.62, 0.00], dtype=np.float32),
+        )
+
+    def _reset_robot_pose(self, cube_xy, target_xy):
+        direction = target_xy - cube_xy
+        direction_norm = float(np.linalg.norm(direction))
+
+        if direction_norm < 1e-6:
+            direction = np.array([1.0, 0.0], dtype=np.float32)
+        else:
+            direction = direction / direction_norm
+
+        start_xy = cube_xy - 0.06 * direction
+        start_pos = np.array([start_xy[0], start_xy[1], 0.12], dtype=np.float32)
+        start_pos = np.clip(start_pos, self._ee_low, self._ee_high)
+
+        self._move_ee_to(start_pos)
+        self._set_gripper(-1.0)
+
+        for _ in range(30):
+            p.stepSimulation(physicsClientId=self.client)
+
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
         self._step_count = 0
 
-        min_sep, min_base_xy = 0.08, 0.15
-        for _ in range(256):
-            c_xy = self.np_random.uniform(self.xy_low, self.xy_high)
-            t_xy = self.np_random.uniform(self.xy_low, self.xy_high)
-            if np.linalg.norm(c_xy - t_xy) < min_sep:
-                continue
-            if np.linalg.norm(c_xy) < min_base_xy or np.linalg.norm(t_xy) < min_base_xy:
-                continue
-            break
-        else:
-            c_xy = np.array([0.5, 0.0], dtype=np.float32)
-            t_xy = np.array([0.5, 0.12], dtype=np.float32)
+        c_xy, t_xy = self._sample_cube_and_target_xy()
 
         self.cube_pos = np.r_[c_xy, self.z_table].astype(np.float32)
         self.target_pos = np.r_[t_xy, self.z_table].astype(np.float32)
@@ -129,7 +210,13 @@ class PandaEnv(gym.Env):
         for fi in self._finger_joints:
             p.resetJointState(self.robot_id, fi, 0.04, physicsClientId=self.client)
 
-        p.stepSimulation(physicsClientId=self.client)
+        self._reset_robot_pose(c_xy, t_xy)
+
+        cube = self._cube_position()
+        ee = self._ee_position()
+        self._prev_cube_to_target = float(np.linalg.norm(cube - self.target_pos))
+        self._prev_ee_to_cube = float(np.linalg.norm(ee - cube))
+
         return self._get_obs(), {}
 
     def _joint_positions(self):
@@ -155,66 +242,48 @@ class PandaEnv(gym.Env):
             )
 
         a = np.asarray(action, dtype=np.float32).reshape(ACTION_DIM)
-        arm_action = a[:7]
-        gripper_cmd = float(np.clip(a[7], -1.0, 1.0))  # -1=open, +1=closed
-        q = self._joint_positions()
-        ee = self._ee_position()
-        cube = self._cube_position()
-        d_ee_cube = float(np.linalg.norm(ee - cube))
+        delta_xyz = 0.03 * a[:3]
+        gripper_cmd = float(np.clip(a[7], -1.0, 1.0))
 
-        # Smaller joint deltas when the hand is close to the cube (softer contact, less "slapping").
-        blend = (
-            1.0
-            if d_ee_cube >= 0.12
-            else max(0.25, min(1.0, d_ee_cube / 0.12))
-        )
-        scale = 0.05 * blend
+        self._move_ee_to(self._ee_target_pos + delta_xyz)
+        self._set_gripper(gripper_cmd)
 
-        for k, ji in enumerate(self._arm_joints):
-            tgt_q = float(
-                np.clip(
-                    q[k] + scale * arm_action[k],
-                    self.joint_low[k],
-                    self.joint_high[k],
-                )
-            )
-            p.setJointMotorControl2(
-                self.robot_id,
-                ji,
-                p.POSITION_CONTROL,
-                targetPosition=tgt_q,
-                positionGain=0.18,
-                velocityGain=0.95,
-                force=80.0,
-                physicsClientId=self.client,
-            )
-
-        # Gripper: learned open/close. -1=open (~0.04), +1=closed (~0.0).
-        finger_target = float(0.02 * (1.0 - gripper_cmd))  # in [0.0, 0.04]
-        for fi in self._finger_joints:
-            p.setJointMotorControl2(
-                self.robot_id,
-                fi,
-                p.POSITION_CONTROL,
-                targetPosition=finger_target,
-                positionGain=0.15,
-                velocityGain=0.9,
-                force=35.0,
-                physicsClientId=self.client,
-            )
-
-        for _ in range(8):
+        for _ in range(12):
             p.stepSimulation(physicsClientId=self.client)
 
         self._step_count += 1
         obs = self._get_obs()
-        cube_n = obs[7:10]
-        reward = float(-np.linalg.norm(cube_n - self.target_pos))
+        cube = obs[7:10]
+        ee = obs[13:16]
+        cube_to_target = float(np.linalg.norm(cube - self.target_pos))
+        ee_to_cube = float(np.linalg.norm(ee - cube))
 
-        terminated = bool(np.linalg.norm(cube_n - self.target_pos) < 0.05)
+        cube_progress = self._prev_cube_to_target - cube_to_target
+        ee_progress = self._prev_ee_to_cube - ee_to_cube
+        contact_bonus = 0.25 if ee_to_cube < 0.06 else 0.0
+        success_bonus = 25.0 if cube_to_target < SUCCESS_DISTANCE else 0.0
+
+        reward = 0.0
+        reward += -2.0 * cube_to_target
+        reward += -0.5 * ee_to_cube
+        reward += 12.0 * cube_progress
+        reward += 2.0 * ee_progress
+        reward += contact_bonus
+        reward += success_bonus
+
+        self._prev_cube_to_target = cube_to_target
+        self._prev_ee_to_cube = ee_to_cube
+
+        terminated = bool(cube_to_target < SUCCESS_DISTANCE)
         truncated = bool(self._step_count >= self.max_episode_steps)
 
-        return obs, reward, terminated, truncated, {}
+        info = {
+            "cube_to_target_distance": cube_to_target,
+            "ee_to_cube_distance": ee_to_cube,
+            "is_success": terminated,
+        }
+
+        return obs, float(reward), terminated, truncated, info
 
     def _get_obs(self):
         """State -> 16-D vector: q(7) | cube_xyz(3) | target_xyz(3) | ee_xyz(3)."""
